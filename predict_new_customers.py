@@ -1,64 +1,81 @@
+# predict_new_customers.py
+
 import pandas as pd
 import numpy as np
-from tensorflow.keras.models import load_model
 import pickle
-from src.utils import save_new_customer
+from tensorflow.keras.models import load_model
+import os
 
-# -----------------------------
-# Load models & preprocessing
-# -----------------------------
-nn = load_model("nn_model.h5")
-
-with open("dt_model.pkl", "rb") as f:
-    dt = pickle.load(f)
-
-with open("preprocess_objects.pkl", "rb") as f:
+# ------------------------------
+# Load preprocessing objects
+# ------------------------------
+with open("src/preprocess_objects.pkl", "rb") as f:
     objs = pickle.load(f)
 
-le = objs['le']
+le_dict = objs['le']
+target_le = objs['target_le']
 scaler = objs['scaler']
 numeric_cols = objs['numeric_cols']
+column_order = objs['column_order']
 
-# -----------------------------
-# User input
-# -----------------------------
+# ------------------------------
+# Load trained models
+# ------------------------------
+nn = load_model("src/nn_model.h5")
+with open("src/dt_model.pkl", "rb") as f:
+    dt = pickle.load(f)
+
+# ------------------------------
+# Get user input for new customer
+# ------------------------------
 print("\n--- Enter New Customer Details ---")
+
 new_customer = {}
-columns_to_ask = list(le.keys()) + numeric_cols + ['SeniorCitizen']
 
-for col in columns_to_ask:
-    if col in numeric_cols + ['SeniorCitizen']:
-        while True:
-            try:
-                new_customer[col] = float(input(f"{col}: "))
-                break
-            except ValueError:
-                print("Enter a valid number!")
-    else:
-        options = list(le[col].classes_)
+# Categorical columns
+for col in le_dict.keys():
+    options = list(le_dict[col].classes_)
+    while True:
         val = input(f"{col} {options}: ")
-        if val not in options:
-            print(f"Invalid input. Using default: {options[0]}")
-            val = options[0]
-        new_customer[col] = le[col].transform([val])[0]
+        if val in options:
+            break
+        print(f"Invalid input. Choose from {options}")
+    new_customer[col] = le_dict[col].transform([val])[0]
 
-# -----------------------------
-# Convert to DataFrame & scale
-# -----------------------------
+# Numeric columns
+for col in numeric_cols + ['SeniorCitizen']:
+    while True:
+        try:
+            val = float(input(f"{col}: "))
+            new_customer[col] = val
+            break
+        except ValueError:
+            print("Enter a valid number!")
+
+# ------------------------------
+# Prepare DataFrame for prediction
+# ------------------------------
 new_df = pd.DataFrame([new_customer])
 new_df[numeric_cols] = scaler.transform(new_df[numeric_cols])
 new_df = new_df.astype(np.float32)
 
-# -----------------------------
-# Predict churn
-# -----------------------------
+# ------------------------------
+# Predict using models
+# ------------------------------
 new_df['ChurnPrediction_NN'] = (nn.predict(new_df) > 0.5).astype(int)
-new_df['ChurnPrediction_DT'] = dt.predict(new_df)
+X_new = new_df.drop(columns=['ChurnPrediction_NN'], errors='ignore')
+X_new = X_new[column_order]  # Ensure correct feature order for DT
+new_df['ChurnPrediction_DT'] = dt.predict(X_new)
 
-# -----------------------------
-# Save prediction
-# -----------------------------
-save_new_customer(new_df)
+# Map predictions back to 'Yes'/'No' for readability
+new_df['ChurnPrediction_NN'] = target_le.inverse_transform(new_df['ChurnPrediction_NN'])
+new_df['ChurnPrediction_DT'] = target_le.inverse_transform(new_df['ChurnPrediction_DT'])
 
-print("\nPrediction saved! Here's the result:")
+# ------------------------------
+# Save predictions to CSV
+# ------------------------------
+output_file = "predicted_customers.csv"
+new_df.to_csv(output_file, mode='a', index=False, header=not os.path.exists(output_file))
+
+print("\nPrediction saved to '{}':".format(output_file))
 print(new_df)
